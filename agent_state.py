@@ -18,6 +18,8 @@ class TurnState:
     items: list[dict[str, Any]] = field(default_factory=list)
     agent_message_buffer: str = ""
     current_agent_message_id: str | None = None
+    reasoning_buffer: str = ""
+    current_reasoning_id: str | None = None
 
 
 class AgentState:
@@ -34,6 +36,7 @@ class AgentState:
         self._client.on_notification("item/started", self._handle_item_started)
         self._client.on_notification("item/completed", self._handle_item_completed)
         self._client.on_notification("item/agentMessage/delta", self._handle_agent_delta)
+        self._client.on_notification("item/reasoning/summaryTextDelta", self._handle_reasoning_delta)
         self._client.on_notification("turn/completed", self._handle_turn_completed)
 
     @property
@@ -186,6 +189,8 @@ class AgentState:
 
         if item_type == "agentMessage":
             self._current_agent_message_id = item_id
+        elif item_type == "reasoning":
+            self._current_reasoning_id = item_id
 
         self._event_queue.put({"type": "item", "event": "started", "item": item})
 
@@ -200,6 +205,10 @@ class AgentState:
         if item_type == "agentMessage" and item_id == self._current_agent_message_id:
             item["text"] = self._current_turn.agent_message_buffer if self._current_turn else ""
             self._current_agent_message_id = None
+        elif item_type == "reasoning" and item_id == self._current_reasoning_id:
+            if self._current_turn and self._current_turn.reasoning_buffer:
+                item["summary"] = self._current_turn.reasoning_buffer
+            self._current_reasoning_id = None
 
         if self._current_turn:
             self._current_turn.items.append(self._item_buffer.get(item_id, item))
@@ -215,6 +224,17 @@ class AgentState:
                 "type": "agentMessage", "id": item_id,
                 "delta": delta_text,
                 "accumulated": self._current_turn.agent_message_buffer,
+            }})
+
+    async def _handle_reasoning_delta(self, params: dict[str, Any]) -> None:
+        delta_text = params.get("delta", "")
+        item_id = params.get("itemId", "")
+        if self._current_turn and item_id == self._current_reasoning_id:
+            self._current_turn.reasoning_buffer += delta_text
+            self._event_queue.put({"type": "item", "event": "delta", "item": {
+                "type": "reasoning", "id": item_id,
+                "delta": delta_text,
+                "accumulated": self._current_turn.reasoning_buffer,
             }})
 
     async def _handle_turn_completed(self, params: dict[str, Any]) -> None:

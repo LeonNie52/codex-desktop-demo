@@ -34,14 +34,51 @@ def _format_item_for_display(item: dict[str, Any]) -> str:
             parts.append(f"**{kind}: `{path}`**\n```diff\n{diff[:1000]}\n```")
         return "\n\n".join(parts)
     elif item_type == "reasoning":
+        summary = item.get("summary") or item.get("accumulated", "")
         content = item.get("content", "")
-        if isinstance(content, list):
-            content = "\n".join(str(c) for c in content)
-        return f"<details><summary>推理过程</summary>\n\n{content}\n\n</details>"
-    elif item_type == "plan":
-        return f"**计划:** {item.get('text', '')}"
+        if not summary and content:
+            if isinstance(content, list):
+                content = "\n".join(
+                    c.get("text", str(c)) if isinstance(c, dict) else str(c)
+                    for c in content
+                )
+            summary = content
+        if not summary:
+            return ""
+        return f"<details><summary>🧠 推理过程</summary>\n\n{summary}\n\n</details>"
+    elif item_type == "mcpToolCall":
+        server = item.get("server", "")
+        tool = item.get("tool", "")
+        status = item.get("status", "")
+        arguments = item.get("arguments", "")
+        result = item.get("result", "")
+        error = item.get("error", "")
+        parts = [f"**🔧 MCP 工具: `{server}/{tool}`** ({status})"]
+        if arguments:
+            args_str = arguments if isinstance(arguments, str) else str(arguments)
+            parts.append(f"<details><summary>参数</summary>\n\n```json\n{args_str[:1500]}\n```\n\n</details>")
+        if result:
+            result_str = result if isinstance(result, str) else str(result)
+            parts.append(f"<details><summary>结果</summary>\n\n```\n{result_str[:1500]}\n```\n\n</details>")
+        if error:
+            parts.append(f"⚠️ **错误:** {error}")
+        return "\n\n".join(parts)
+    elif item_type == "dynamicToolCall":
+        tool = item.get("tool", "")
+        status = item.get("status", "")
+        arguments = item.get("arguments", "")
+        success = item.get("success")
+        parts = [f"**⚡ 动态工具: `{tool}`** ({status})"]
+        if arguments:
+            args_str = arguments if isinstance(arguments, str) else str(arguments)
+            parts.append(f"<details><summary>参数</summary>\n\n```json\n{args_str[:1500]}\n```\n\n</details>")
+        if success is not None:
+            parts.append(f"{'✅ 成功' if success else '❌ 失败'}")
+        return "\n\n".join(parts)
     elif item_type == "webSearch":
-        return f"**搜索:** {item.get('query', '')}"
+        return f"**🔍 搜索:** {item.get('query', '')}"
+    elif item_type == "plan":
+        return f"**📋 计划:** {item.get('text', '')}"
     elif item_type == "contextCompaction":
         return "*上下文已压缩*"
     return f"*[{item_type}]*"
@@ -65,6 +102,16 @@ def _msg_text(msg: dict) -> str:
 def _set_msg_text(msg: dict, text: str) -> None:
     """更新消息文本（就地修改）"""
     msg["content"] = [{"type": "text", "text": text}]
+
+
+def _build_assistant_content(reasoning: str, body: str) -> str:
+    """组装 assistant 消息：推理过程（折叠）+ 正文."""
+    parts = []
+    if reasoning:
+        parts.append(f"<details><summary>🧠 推理过程</summary>\n\n{reasoning}\n\n</details>")
+    if body:
+        parts.append(body)
+    return "\n\n".join(parts) if parts else ""
 
 
 def _make_status_html(text: str, css_class: str) -> str:
@@ -276,6 +323,7 @@ class CodexGUI:
         assistant_msg = _msg("assistant", "")
         history.append(assistant_msg)
         current_text = ""
+        reasoning_text = ""
         rendered_ids: set[str] = set()
 
         eq: queue.Queue = self._state.event_queue
@@ -296,7 +344,7 @@ class CodexGUI:
                     current_text += "\n\n*Turn 执行失败*"
                 elif status == "interrupted":
                     current_text += "\n\n*已中断*"
-                _set_msg_text(assistant_msg, current_text)
+                _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text))
                 break
 
             if event["type"] == "item":
@@ -308,16 +356,19 @@ class CodexGUI:
                 if item_type == "agentMessage":
                     if ev == "delta":
                         current_text = item.get("accumulated", current_text)
+                elif item_type == "reasoning":
+                    if ev == "delta":
+                        reasoning_text = item.get("accumulated", reasoning_text)
                 elif item_type not in ("userMessage",) and ev == "completed" and item_id not in rendered_ids:
                     rendered_ids.add(item_id)
                     rendered = _format_item_for_display(item)
                     if rendered and rendered not in current_text:
                         current_text += f"\n\n{rendered}"
 
-            _set_msg_text(assistant_msg, current_text)
+            _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text))
             yield "", history
 
-        _set_msg_text(assistant_msg, current_text or "*Agent 已响应*")
+        _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text or "*Agent 已响应*"))
         yield "", history
 
     async def _handle_stop(self, history: list[dict[str, str]]) -> tuple:
