@@ -18,10 +18,13 @@ def _format_item_for_display(item: dict[str, Any]) -> str:
         cmd = item.get("command", "")
         output = item.get("aggregatedOutput", "")
         exit_code = item.get("exitCode")
+        status = item.get("status", "")
         lines = [f"```bash\n$ {cmd}\n```"]
         if output:
             lines.append(f"```\n{output[:2000]}\n```")
-        if exit_code is not None:
+        if status == "inProgress":
+            lines.append("*⏳ 执行中...*")
+        elif exit_code is not None:
             lines.append(f"*退出码: {exit_code}*")
         return "\n".join(lines)
     elif item_type == "fileChange":
@@ -53,7 +56,8 @@ def _format_item_for_display(item: dict[str, Any]) -> str:
         arguments = item.get("arguments", "")
         result = item.get("result", "")
         error = item.get("error", "")
-        parts = [f"**🔧 MCP 工具: `{server}/{tool}`** ({status})"]
+        icon = "⏳" if status == "inProgress" else "🔧"
+        parts = [f"**{icon} MCP 工具: `{server}/{tool}`** ({status})"]
         if arguments:
             args_str = arguments if isinstance(arguments, str) else str(arguments)
             parts.append(f"<details><summary>参数</summary>\n\n```json\n{args_str[:1500]}\n```\n\n</details>")
@@ -367,7 +371,7 @@ class CodexGUI:
                 elif item_type == "reasoning":
                     if ev == "delta":
                         reasoning_text = item.get("accumulated", reasoning_text)
-                elif item_type not in ("userMessage",) and ev == "completed":
+                elif item_type not in ("userMessage",) and ev in ("started", "completed"):
                     rendered = _format_item_for_display(item)
                     if rendered:
                         upsert_block(item_id, item_type, rendered)
