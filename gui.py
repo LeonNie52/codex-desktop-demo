@@ -322,10 +322,18 @@ class CodexGUI:
 
         assistant_msg = _msg("assistant", "")
         history.append(assistant_msg)
-        agent_text = ""       # agentMessage 的流式正文
-        reasoning_text = ""   # reasoning 的流式摘要
-        attachments: list[str] = []  # commandExecution/fileChange/mcpToolCall 等渲染结果
-        rendered_ids: set[str] = set()
+        reasoning_text = ""
+        blocks: list[dict[str, Any]] = []  # 有序内容块: {"id":..., "type":..., "text":...}
+        block_order: dict[str, int] = {}    # item_id → 在 blocks 中的位置
+
+        def upsert_block(item_id: str, item_type: str, text: str) -> None:
+            """按 item_id 更新或插入内容块，保持事件顺序。"""
+            if item_id in block_order:
+                idx = block_order[item_id]
+                blocks[idx]["text"] = text
+            else:
+                block_order[item_id] = len(blocks)
+                blocks.append({"id": item_id, "type": item_type, "text": text})
 
         eq: queue.Queue = self._state.event_queue
 
@@ -342,9 +350,9 @@ class CodexGUI:
                 self._agent_running = False
                 status = event["status"]
                 if status == "failed":
-                    attachments.append("*Turn 执行失败*")
+                    upsert_block("_turn_error", "error", "*Turn 执行失败*")
                 elif status == "interrupted":
-                    attachments.append("*已中断*")
+                    upsert_block("_turn_error", "error", "*已中断*")
                 break
 
             if event["type"] == "item":
@@ -355,21 +363,20 @@ class CodexGUI:
 
                 if item_type == "agentMessage":
                     if ev == "delta":
-                        agent_text = item.get("accumulated", agent_text)
+                        upsert_block(item_id, "agentMessage", item.get("accumulated", ""))
                 elif item_type == "reasoning":
                     if ev == "delta":
                         reasoning_text = item.get("accumulated", reasoning_text)
-                elif item_type not in ("userMessage",) and ev == "completed" and item_id not in rendered_ids:
-                    rendered_ids.add(item_id)
+                elif item_type not in ("userMessage",) and ev == "completed":
                     rendered = _format_item_for_display(item)
                     if rendered:
-                        attachments.append(rendered)
+                        upsert_block(item_id, item_type, rendered)
 
-            body = agent_text + ("\n\n" + "\n\n".join(attachments) if attachments else "")
+            body = "\n\n".join(b["text"] for b in blocks if b["text"])
             _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, body))
             yield "", history
 
-        body = agent_text + ("\n\n" + "\n\n".join(attachments) if attachments else "")
+        body = "\n\n".join(b["text"] for b in blocks if b["text"])
         _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, body or "*Agent 已响应*"))
         yield "", history
 
