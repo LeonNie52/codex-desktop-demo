@@ -322,8 +322,9 @@ class CodexGUI:
 
         assistant_msg = _msg("assistant", "")
         history.append(assistant_msg)
-        current_text = ""
-        reasoning_text = ""
+        agent_text = ""       # agentMessage 的流式正文
+        reasoning_text = ""   # reasoning 的流式摘要
+        attachments: list[str] = []  # commandExecution/fileChange/mcpToolCall 等渲染结果
         rendered_ids: set[str] = set()
 
         eq: queue.Queue = self._state.event_queue
@@ -341,10 +342,9 @@ class CodexGUI:
                 self._agent_running = False
                 status = event["status"]
                 if status == "failed":
-                    current_text += "\n\n*Turn 执行失败*"
+                    attachments.append("*Turn 执行失败*")
                 elif status == "interrupted":
-                    current_text += "\n\n*已中断*"
-                _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text))
+                    attachments.append("*已中断*")
                 break
 
             if event["type"] == "item":
@@ -355,20 +355,22 @@ class CodexGUI:
 
                 if item_type == "agentMessage":
                     if ev == "delta":
-                        current_text = item.get("accumulated", current_text)
+                        agent_text = item.get("accumulated", agent_text)
                 elif item_type == "reasoning":
                     if ev == "delta":
                         reasoning_text = item.get("accumulated", reasoning_text)
                 elif item_type not in ("userMessage",) and ev == "completed" and item_id not in rendered_ids:
                     rendered_ids.add(item_id)
                     rendered = _format_item_for_display(item)
-                    if rendered and rendered not in current_text:
-                        current_text += f"\n\n{rendered}"
+                    if rendered:
+                        attachments.append(rendered)
 
-            _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text))
+            body = agent_text + ("\n\n" + "\n\n".join(attachments) if attachments else "")
+            _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, body))
             yield "", history
 
-        _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, current_text or "*Agent 已响应*"))
+        body = agent_text + ("\n\n" + "\n\n".join(attachments) if attachments else "")
+        _set_msg_text(assistant_msg, _build_assistant_content(reasoning_text, body or "*Agent 已响应*"))
         yield "", history
 
     async def _handle_stop(self, history: list[dict[str, str]]) -> tuple:
