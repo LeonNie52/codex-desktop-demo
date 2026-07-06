@@ -37,6 +37,7 @@ class AgentState:
         self._client.on_notification("item/completed", self._handle_item_completed)
         self._client.on_notification("item/agentMessage/delta", self._handle_agent_delta)
         self._client.on_notification("item/reasoning/summaryTextDelta", self._handle_reasoning_delta)
+        self._client.on_notification("item/reasoning/summaryPartAdded", self._handle_reasoning_part_added)
         self._client.on_notification("turn/completed", self._handle_turn_completed)
 
     @property
@@ -236,6 +237,17 @@ class AgentState:
                 "delta": delta_text,
                 "accumulated": self._current_turn.reasoning_buffer,
             }})
+
+    async def _handle_reasoning_part_added(self, params: dict[str, Any]) -> None:
+        item_id = params.get("itemId", "")
+        if self._current_turn and item_id == self._current_reasoning_id:
+            sep = "\n\n---\n\n"
+            if self._current_turn.reasoning_buffer and not self._current_turn.reasoning_buffer.endswith(sep):
+                self._current_turn.reasoning_buffer += sep
+                self._event_queue.put({"type": "item", "event": "delta", "item": {
+                    "type": "reasoning", "id": item_id,
+                    "accumulated": self._current_turn.reasoning_buffer,
+                }})
 
     async def _handle_turn_completed(self, params: dict[str, Any]) -> None:
         turn_data = params.get("turn", {})
