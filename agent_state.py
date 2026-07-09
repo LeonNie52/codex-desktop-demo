@@ -64,6 +64,16 @@ class AgentState:
     def event_queue(self) -> queue.Queue[dict[str, Any]]:
         return self._event_queue
 
+    def _reset_turn_state(self) -> None:
+        """清空所有 turn 级状态：丢弃上一个焦点 thread/turn 残留的缓冲与事件。
+
+        item/* 通知不带 threadId/turnId（协议约束），无法路由到具体 thread，
+        因此切换 thread 时必须彻底清理本地状态，避免旧 thread 的流污染新 thread。
+        """
+        self._current_turn = None
+        self._item_buffer.clear()
+        self._event_queue = queue.Queue()
+
     def _run_async(self, coro) -> Any:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return future.result(timeout=120)
@@ -100,7 +110,7 @@ class AgentState:
         result = await self._client.request("thread/start", params)
         thread = result.get("thread", {})
         self._current_thread_id = thread.get("id")
-        self._current_turn = None
+        self._reset_turn_state()
         self._threads.insert(0, thread)
         return thread
 
@@ -111,7 +121,7 @@ class AgentState:
         result = await self._client.request("thread/resume", {"threadId": thread_id})
         thread = result.get("thread", {})
         self._current_thread_id = thread_id
-        self._current_turn = None
+        self._reset_turn_state()
         return thread
 
     def sync_resume_thread(self, thread_id: str) -> dict[str, Any]:
@@ -139,7 +149,7 @@ class AgentState:
         self._threads = [t for t in self._threads if t.get("id") != thread_id]
         if self._current_thread_id == thread_id:
             self._current_thread_id = None
-            self._current_turn = None
+            self._reset_turn_state()
 
     def sync_delete_thread(self, thread_id: str) -> None:
         self._run_async(self.delete_thread(thread_id))
@@ -186,12 +196,14 @@ class AgentState:
         item_id = item.get("id", "")
         item_type = item.get("type", "")
         logger.info("item/started: type=%s, id=%s", item_type, item_id)
+        if self._current_turn is None:
+            return
         self._item_buffer[item_id] = item
 
         if item_type == "agentMessage":
-            self._current_agent_message_id = item_id
+            self._current_turn.current_agent_message_id = item_id
         elif item_type == "reasoning":
-            self._current_reasoning_id = item_id
+            self._current_turn.current_reasoning_id = item_id
 
         self._event_queue.put({"type": "item", "event": "started", "item": item})
 
@@ -200,26 +212,30 @@ class AgentState:
         item_id = item.get("id", "")
         item_type = item.get("type", "")
 
+        if self._current_turn is None:
+            return
+
         if item_id in self._item_buffer:
             self._item_buffer[item_id] = {**self._item_buffer[item_id], **item}
 
-        if item_type == "agentMessage" and item_id == self._current_agent_message_id:
-            item["text"] = self._current_turn.agent_message_buffer if self._current_turn else ""
-            self._current_agent_message_id = None
-        elif item_type == "reasoning" and item_id == self._current_reasoning_id:
-            if self._current_turn and self._current_turn.reasoning_buffer:
+        if item_type == "agentMessage" and item_id == self._current_turn.current_agent_message_id:
+            item["text"] = self._current_turn.agent_message_buffer
+            self._current_turn.current_agent_message_id = None
+        elif item_type == "reasoning" and item_id == self._current_turn.current_reasoning_id:
+            if self._current_turn.reasoning_buffer:
                 item["summary"] = self._current_turn.reasoning_buffer
-            self._current_reasoning_id = None
+            self._current_turn.current_reasoning_id = None
 
-        if self._current_turn:
-            self._current_turn.items.append(self._item_buffer.get(item_id, item))
+        self._current_turn.items.append(self._item_buffer.get(item_id, item))
 
         self._event_queue.put({"type": "item", "event": "completed", "item": self._item_buffer.get(item_id, item)})
 
     async def _handle_agent_delta(self, params: dict[str, Any]) -> None:
+        if self._current_turn is None:
+            return
         delta_text = params.get("delta", "")
         item_id = params.get("itemId", "")
-        if self._current_turn and item_id == self._current_agent_message_id:
+        if item_id == self._current_turn.current_agent_message_id:
             self._current_turn.agent_message_buffer += delta_text
             self._event_queue.put({"type": "item", "event": "delta", "item": {
                 "type": "agentMessage", "id": item_id,
@@ -228,9 +244,11 @@ class AgentState:
             }})
 
     async def _handle_reasoning_delta(self, params: dict[str, Any]) -> None:
+        if self._current_turn is None:
+            return
         delta_text = params.get("delta", "")
         item_id = params.get("itemId", "")
-        if self._current_turn and item_id == self._current_reasoning_id:
+        if item_id == self._current_turn.current_reasoning_id:
             self._current_turn.reasoning_buffer += delta_text
             self._event_queue.put({"type": "item", "event": "delta", "item": {
                 "type": "reasoning", "id": item_id,
@@ -239,8 +257,10 @@ class AgentState:
             }})
 
     async def _handle_reasoning_part_added(self, params: dict[str, Any]) -> None:
+        if self._current_turn is None:
+            return
         item_id = params.get("itemId", "")
-        if self._current_turn and item_id == self._current_reasoning_id:
+        if item_id == self._current_turn.current_reasoning_id:
             sep = "\n\n---\n\n"
             if self._current_turn.reasoning_buffer and not self._current_turn.reasoning_buffer.endswith(sep):
                 self._current_turn.reasoning_buffer += sep
@@ -253,6 +273,7 @@ class AgentState:
         turn_data = params.get("turn", {})
         status = turn_data.get("status", "unknown")
         logger.info("turn/completed 收到, status=%s, error=%s", status, turn_data.get("error"))
-        if self._current_turn:
-            self._current_turn.status = status
+        if self._current_turn is None:
+            return
+        self._current_turn.status = status
         self._event_queue.put({"type": "turn_done", "status": status})
