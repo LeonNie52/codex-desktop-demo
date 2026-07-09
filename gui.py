@@ -10,6 +10,36 @@ import gradio as gr
 from agent_state import AgentState
 
 
+def _extract_reasoning_text(item: dict[str, Any]) -> str:
+    """从 reasoning item 提取纯文本（summary 优先，回退到 content）。
+
+    summary 可能是 str 或 list[str]（每段对应一个 summary part）；
+    list 时用与实时流 summaryPartAdded 一致的分隔符连接。
+    """
+    summary = item.get("summary")
+    if summary is None:
+        summary = item.get("accumulated", "")
+    if isinstance(summary, list):
+        parts = []
+        for s in summary:
+            if isinstance(s, str):
+                parts.append(s)
+            elif isinstance(s, dict):
+                parts.append(s.get("text", str(s)))
+            else:
+                parts.append(str(s))
+        summary = "\n\n---\n\n".join(parts)
+    if summary:
+        return summary
+    content = item.get("content", "")
+    if isinstance(content, list):
+        return "\n".join(
+            c.get("text", str(c)) if isinstance(c, dict) else str(c)
+            for c in content
+        )
+    return content or ""
+
+
 def _format_item_for_display(item: dict[str, Any]) -> str:
     item_type = item.get("type", "")
     if item_type == "agentMessage":
@@ -37,15 +67,7 @@ def _format_item_for_display(item: dict[str, Any]) -> str:
             parts.append(f"**{kind}: `{path}`**\n```diff\n{diff[:1000]}\n```")
         return "\n\n".join(parts)
     elif item_type == "reasoning":
-        summary = item.get("summary") or item.get("accumulated", "")
-        content = item.get("content", "")
-        if not summary and content:
-            if isinstance(content, list):
-                content = "\n".join(
-                    c.get("text", str(c)) if isinstance(c, dict) else str(c)
-                    for c in content
-                )
-            summary = content
+        summary = _extract_reasoning_text(item)
         if not summary:
             return ""
         return f"<details><summary>🧠 推理过程</summary>\n\n{summary}\n\n</details>"
@@ -403,6 +425,7 @@ class CodexGUI:
 
     def _render_history(self, thread: dict[str, Any]) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
+        pending_reasoning = ""
         for turn in thread.get("turns", []):
             for item in turn.get("items", []) or []:
                 item_type = item.get("type", "")
@@ -417,11 +440,19 @@ class CodexGUI:
                 elif item_type == "agentMessage":
                     text = item.get("text", "")
                     if text:
-                        messages.append(_msg("assistant", text))
+                        messages.append(_msg("assistant", _build_assistant_content(pending_reasoning, text)))
+                        pending_reasoning = ""
+                elif item_type == "reasoning":
+                    rtext = _extract_reasoning_text(item)
+                    if rtext:
+                        pending_reasoning = f"{pending_reasoning}\n\n{rtext}" if pending_reasoning else rtext
                 else:
                     rendered = _format_item_for_display(item)
                     if rendered and messages and messages[-1]["role"] == "assistant":
                         _set_msg_text(messages[-1], _msg_text(messages[-1]) + f"\n\n{rendered}")
+            if pending_reasoning:
+                messages.append(_msg("assistant", _build_assistant_content(pending_reasoning, "")))
+                pending_reasoning = ""
         return messages
 
     def _noop_4(self) -> tuple:
