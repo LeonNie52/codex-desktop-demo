@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "openaiDeveloperDocs": {
+      "enabled": true,
+      "type": "remote",
+      "url": "https://developers.openai.com/mcp"
+    },
+    "Cua Docs & Code": {
+      "enabled": true,
+      "type": "remote",
+      "url": "https://vk-mcp.cua.ai/mcp"
+    }
+  },
+  "references": {
+    // "docs": {
+    //   "path": "../product-docs",
+    //   "description": "Use for product behavior and documentation conventions",
+    "codex-sdk": {
+      "repository": "openai/codex",
+      "branch": "main",
+      "description": "Use for Codex implementation details"
+    },
+    "cua": {
+      "repository": "trycua/cua",
+      "branch": "main",
+      "description": "Use for ComputerUse implementation details,Scale computer-use 2.0 with open-source drivers, cross-OS fleets, and benchmarks for training, evaluation, and data generation"
+    }
+  }
+}

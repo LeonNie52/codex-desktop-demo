@@ -36,3 +36,8 @@ uv run codex-demo
 - Python >= 3.10
 - Codex CLI（`codex app-server` 命令可用）
 - 已认证的 Codex 账号（`codex login`）
+
+## 开发模板
+
+- [Codex Python Hook 标准模板](./examples/codex-hooks-python/README.md)：覆盖当前 hook
+  事件、配置与输入输出字段，并内置结构化轮转日志、脱敏、校验和冒烟测试。

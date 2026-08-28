@@ -1,0 +1,238 @@
+# Codex 技能加载次数记录方案
+
+> 调研备忘：codex 的 hooks 系统**没有**专门针对"技能加载"的事件，但内置 `codex_analytics` 已经在显式 / 隐式技能调用时埋好了事件和指标。本文档介绍如何复用它们做自建计数。
+
+## 1. 结论先行
+
+| 问题 | 答案 |
+|---|---|
+| codex hooks 有"skill loaded"事件吗？ | **没有**。`hooks.json` 仅支持 `PreToolUse / PermissionRequest / PostToolUse / PreCompact / PostCompact / SessionStart / UserPromptSubmit / SubagentStart / SubagentStop / Stop` |
+| 记录技能加载次数最干净的路？ | **复用 `codex_analytics` 内置通道**，零侵入，覆盖显式和隐式调用 |
+| 需要的构建？ | Release 也能用，推荐 Debug（可额外启用本地 capture 文件） |
+
+## 2. 数据流总览
+
+技能调用发生后，数据沿**两条独立通道**并行流出，互不依赖：
+
+```
+                   ┌─── 通道① Analytics Events（结构化事件流） ───┐
+                   │                                              │
+                   │   fact: SkillInvoked                         │
+                   │   → reducer 转成 SkillInvocationEventRequest │
+技能调用           │   → 出口三选一：                              │
+───────► ────────►│     • HTTP POST（默认）                        │
+                   │     • 本地 capture 文件（仅 debug）           │
+                   │     • 被 drop（auth 不符/analytics 关闭）     │
+                   │                                              │
+                   └──────────────────────────────────────────────┘
+
+                   ┌─── 通道② OTel Metrics（counter 指标）───────┐
+                   │   counter: codex.skill.injected              │
+                   │   tags: status / skill / invoke_type         │
+                   │   → 通过 OTLP 协议导出到 MetricsExporter     │
+                   └──────────────────────────────────────────────┘
+```
+
+## 3. 触发点（数据从哪儿来）
+
+| 场景 | 触发函数 | 上报内容 |
+|---|---|---|
+| **显式调用**（用户写 `$skill-name`） | `codex-rs/core-skills/src/injection.rs:113` `build_skill_injections` | 通道① `track_skill_invocations` + 通道② counter(status=ok/error, skill, 无 invoke_type) |
+| **隐式调用**（模型读 SKILL.md / 跑技能脚本） | `codex-rs/core/src/skills.rs:104-123` `maybe_emit_implicit_skill_invocation` | 通道① `track_skill_invocations` + 通道② counter(status=ok, skill, invoke_type=implicit) |
+
+**关键语义**：
+- 隐式调用在**每个 turn 内**对同一技能去重（`implicit_invocation_seen_skills`，见 `codex-rs/core/src/skills.rs:79-88`），跨 turn 会重复发
+- 显式调用**不去重**，一次 prompt 中 mention 两个不同技能会发两条；mention 同一技能两次算一条（`injection.rs` 的 `seen_paths`）
+
+## 4. 通道①字段定义（结构化事件流）
+
+定义在 `codex-rs/analytics/src/events.rs:121-138`，每条 `skill_invocation` 事件的 JSON 形状（来自 `codex-rs/analytics/src/analytics_client_tests.rs:3461`）：
+
+```json
+{
+  "event_type": "skill_invocation",
+  "skill_id": "<sha1 of repo_url+path+name>",
+  "skill_name": "doc",
+  "event_params": {
+    "product_client_id": "...",
+    "skill_scope": "user | repo | system | admin",
+    "plugin_id": "sample@test | null",
+    "repo_url": "https://... | null",
+    "thread_id": "thread-1",
+    "turn_id": "turn-1",
+    "invoke_type": "explicit | implicit",
+    "model_slug": "gpt-5"
+  }
+}
+```
+
+`skill_id` 是基于 `repo_url + skill_path + skill_name` 的 SHA1（见 `codex-rs/analytics/src/reducer.rs:2779` `skill_id_for_local_skill`）。**同一技能在不同机器/仓库会得到稳定 ID**，适合做聚合。
+
+相关 schema：
+- `CodexAuth::create_dummy_chatgpt_auth_for_testing`（客户端）：
+- `executor_roots`：阻断工具
+- `Implicit`/`Explicit`（来源：调用或 mentions）：
+
+通道①上报路径字段：product_client_id、skill_scope、plugin_id、repo_url、thread_id、turn_id、invoke_type、model_slug。
+
+## 5. 通道①三条出口对比
+
+| 出口 | 触发条件 | 配置 | 数据格式 | 是否适合自建 |
+|---|---|---|---|---|
+| **HTTP POST** | release/debug 都生效，但需 `auth.uses_codex_backend()` 为 true（登录到 ChatGPT 后端） | URL 硬编码为 `{chatgpt_base_url}/codex/analytics-events/events`（`codex-rs/analytics/src/client.rs:108`） | JSON array of events | ❌ 强绑定 ChatGPT 后端，无法独立重定向 |
+| **本地 capture 文件** | **仅 debug 构建**（`#[cfg(debug_assertions)]`） | 环境变量 `CODEX_ANALYTICS_EVENTS_CAPTURE_FILE=/path/events.jsonl` | 每行一个 `{"events":[...]}` JSON，文件权限 0600 | ✅ debug 构建下可用 |
+| **静默丢弃** | release 构建 + auth 不通过 / `analytics_enabled = false` | 无 | 无 | — |
+
+**capture 文件关键代码**：`codex-rs/analytics/src/analytics_capture.rs`。开关是 `#[cfg(debug_assertions)]`，`OpenOptions::mode(0o600)`（仅 Unix）。Release 构建时该环境变量被静默忽略（`codex-rs/analytics/src/client.rs:103-104`）。
+
+## 6. 通道② OTel Metrics 详情
+
+**指标名**：`codex.skill.injected`（硬编码字符串，未在 `codex-rs/otel/src/metrics/names.rs` 注册常量）
+
+**tags**：
+- `status`：`ok` / `error`（仅显式调用可能 error；隐式调用恒 ok）
+- `skill`：技能名（如 `doc`）
+- `invoke_type`：`implicit`（**仅隐式调用带**，显式调用不带这个 tag）
+
+**相邻的技能相关 counter**（`codex-rs/otel/src/metrics/names.rs:57-61`）：
+
+| Metric | 含义 |
+|---|---|
+| `codex.thread.skills.enabled_total` | 每个 thread 启用的技能总数 |
+| `codex.thread.skills.kept_total` | 经过筛选后保留的技能数 |
+| `codex.thread.skills.description_truncated_chars` | 描述被截断的字符数 |
+| `codex.thread.skills.truncated` | 是否发生截断 |
+
+**MetricsExporter**（`codex-rs/otel/src/metrics/client.rs:506` `build_otlp_metric_exporter`）：
+
+| Exporter | 行为 |
+|---|---|
+| `statsig`（默认） | release：发往 `https://ab.chatgpt.com/otlp/v1/metrics`（OpenAI 内部 Statsig）；**debug：被强制改成 None**（`codex-rs/otel/src/config.rs:20`） |
+| `otlp-http` | 发往自定义 HTTP OTLP 接收端（如 `http://localhost:4318`） |
+| `otlp-grpc` | 发往自定义 gRPC OTLP 接收端（如 `http://localhost:4317`） |
+| `none` | 关闭 |
+
+## 7. 全局开关与相互约束
+
+`~/.codex/config.toml`：
+
+```toml
+[analytics]
+# 总开关。设为 false 会同时关掉通道①和通道②
+# (见 codex-rs/core/src/otel_init.rs:70-77：analytics_enabled=false
+#  时 metrics_exporter 被强制改为 None)
+enabled = true
+
+[otel]
+environment = "dev"               # 全局标签
+metrics_exporter = "otlp-http"    # 通道②的出口
+# metrics_exporter = "statsig"   # 默认；debug 下等同 none
+# metrics_exporter = "none"
+
+# 自建 OTLP HTTP collector 示例（otelcol / Grafana Alloy / Prometheus）
+[otel.metrics_exporter.otlp-http]
+endpoint = "http://localhost:4318"
+protocol = "json"                 # 或 "binary"
+# 可选：自定义 headers（Bearer、API key 等）
+[otel.metrics_exporter.otlp-http.headers]
+Authorization = "Bearer <token>"
+```
+
+`[otel]` 还提供：
+
+| 字段 | 说明 |
+|---|---|
+| `environment` | 标签，默认 `dev` |
+| `metrics_exporter` | 上面表格 |
+| `trace_exporter` | 不影响技能计数 |
+| `exporter` | 日志/trace，不影响技能计数 |
+| `log_user_prompt` | 是否把 prompt 原文记到 trace |
+| `span_attributes` | 附加属性，会被加到每个 span |
+| `tracestate` | W3C tracestate |
+
+## 8. 实施：起 OTLP Collector + 改 config
+
+> 目标：debug 构建 + 自建数据收集/分析。**通道②为主，通道① capture 文件为辅**。
+> 理由：通道②做时序聚合（每次调用一次 counter），可直接对接 Prometheus/Grafana；通道① capture 文件做明细审计（一次性 JSONL，含 thread_id/turn_id/scope/plugin_id）。
+
+### 步骤
+
+1. 起一个本地 OTLP receiver（任选其一）：
+   - OpenTelemetry Collector (`otelcol-contrib`)，配置 `receivers.otlp { protocols: { http: { endpoint: "0.0.0.0:4318" } } }`
+   - Grafana Alloy
+   - Prometheus：`./prometheus --web.enable-otlp-receiver --web.listen-address=:4318`
+   - 自己写 HTTP server 收 `/v1/metrics`（参考 `codex-rs/otel/tests/suite/otlp_http_loopback.rs:143`）
+
+2. 写 `~/.codex/config.toml`：
+
+```toml
+[analytics]
+enabled = true
+
+[otel]
+environment = "dev"
+metrics_exporter = "otlp-http"
+
+[otel.metrics_exporter.otlp-http]
+endpoint = "http://localhost:4318"
+protocol = "json"
+```
+
+3. 跑 codex（debug 构建，启用 capture 文件作为辅助）：
+
+```bash
+CODEX_ANALYTICS_EVENTS_CAPTURE_FILE=/tmp/codex-skills.jsonl cargo run -p codex-cli -- ...
+```
+
+> Release 构建请去掉 `CODEX_ANALYTICS_EVENTS_CAPTURE_FILE`，该变量在 release 下无效。
+
+4. 触发技能调用（发一条带 `$skill-name` 的 prompt，或让模型读 SKILL.md / 跑技能脚本）。
+
+5. 验证：
+
+```bash
+# 通道①：明细审计
+jq -c 'select(.events[0].event_type == "skill_invocation")' /tmp/codex-skills.jsonl
+
+# 通道②：聚合（按技能拆）
+echo 'increase(codex_skill_injected_total{skill=~".+"}[5m])' | promtool query instant http://localhost:9090
+
+# Grafana：PromQL 面板
+# sum by (skill) (rate(codex_skill_injected_total[5m]))
+```
+
+## 9. 局限与注意事项
+
+| 局限 | 解释 |
+|---|---|
+| 不能记录"技能被列入可用列表"的次数 | SessionStart 时只是扫描加载，没有专门的 analytics 事件；只有真正被调用（显式或隐式）才会触发 |
+| HTTP 上报出口对自建无用 | 绑定 ChatGPT 后端 + auth，无法单独重定向 |
+| capture 文件仅 debug 可用 | release 构建下 `CODEX_ANALYTICS_EVENTS_CAPTURE_FILE` 被忽略 |
+| `analytics_enabled = false` 是核选项 | 同时砍掉两个通道 |
+| 隐式调用在 turn 内去重 | 同一 turn 内同技能多次读取只发一次事件；想精确统计"读取次数"会被低估 |
+| `codex.skill.injected` 未在常量表注册 | 监控告警需要用字符串字面量匹配 |
+| counter 没有 `invoke_type=explicit` 标签 | 只有 `implicit`；区分两种调用类型主要靠 channel① capture 文件或 `skill_id`/`invoke_type` 字段 |
+
+## 10. 关键代码索引
+
+| 关注点 | 位置 |
+|---|---|
+| `SkillInvocation` fact 定义 | `codex-rs/analytics/src/facts.rs:323` |
+| `SkillInvoked` 枚举变体 | `codex-rs/analytics/src/facts.rs:507` |
+| `track_skill_invocations` 入口 | `codex-rs/analytics/src/client.rs:209` |
+| `SkillInvocationEventRequest` 上报格式 | `codex-rs/analytics/src/events.rs:121` |
+| reducer 转 event 逻辑 | `codex-rs/analytics/src/reducer.rs:741-763` |
+| HTTP 上报实现 | `codex-rs/analytics/src/client.rs:555-640` |
+| 本地 capture 文件实现 | `codex-rs/analytics/src/analytics_capture.rs` |
+| 显式调用上报（OTel counter） | `codex-rs/core-skills/src/injection.rs:113, 131` |
+| 隐式调用上报（OTel counter） | `codex-rs/core/src/skills.rs:104, 115` |
+| `OtelProvider` 与 `analytics_enabled` 联动 | `codex-rs/core/src/otel_init.rs:70-77` |
+| 已知 metric 名常量表 | `codex-rs/otel/src/metrics/names.rs` |
+| `MetricsClient::counter` | `codex-rs/otel/src/metrics/client.rs:341` |
+| OTLP HTTP loopback 测试样例 | `codex-rs/otel/tests/suite/otlp_http_loopback.rs:143` |
+| SkillInvocationContributor Trait（扩展点） | `codex-rs/ext/extension-api/src/contributors/skill_invocation.rs` |
+
+## 11. 其他可参考的扩展点（不推荐，但对项目作者透明）
+
+- **`SkillInvocationContributor` Trait**（`codex-rs/ext/extension-api/src/contributors/skill_invocation.rs`）：Rust 扩展 API。在 `codex-rs/ext/skills/src/extension.rs:489` 注册，每次显式/隐式技能调用都会回调。适合改源码做产品级数据收集。
+- 钩子层面可用 `UserPromptSubmit`（`codex-rs/hooks/schema/generated/user-prompt-submit.command.input.schema.json`，含 `prompt` 字段）。但**只能捕获显式 mention**，无法捕获隐式调用，且需要自己处理去重和歧义。

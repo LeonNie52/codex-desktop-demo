@@ -1,0 +1,164 @@
+{
+  "description": "Python Codex hooks template. Copy hook.py to <repo>/.codex/hooks/hook.py before enabling.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "async": false,
+            "statusMessage": "Running SessionStart policy",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "other",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 3,
+            "statusMessage": "Saving session state"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Preparing subagent context",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Checking tool policy",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Checking approval policy"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "async": false,
+            "statusMessage": "Reviewing tool result",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Preparing compaction"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Finishing compaction"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Checking prompt policy",
+            "additionalContextLimit": 2500
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Checking subagent completion"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/hook.py\"",
+            "commandWindows": "py -3 C:\\ABSOLUTE\\PATH\\TO\\REPO\\.codex\\hooks\\hook.py",
+            "timeout": 30,
+            "statusMessage": "Checking turn completion"
+          }
+        ]
+      }
+    ]
+  }
+}
